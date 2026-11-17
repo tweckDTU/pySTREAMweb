@@ -43,11 +43,11 @@ from Time_Series import run_timeSeries
 # DTU & DTU Wind Color Palette
 # ==============================================================================
 dtu_red = '#990000'          # DTU Corporate Red
-dtu_navy = '#002846'         # DTU Wind Deep Navy (Primary Dark)
-dtu_blue = '#003366'         # DTU Wind Classic Blue
-dtu_energy_blue = '#006699'  # DTU Bright Energy Blue
-dtu_light_blue = '#EBF3F8'   # Soft Wind Blue Tint
-dtu_sky = '#299ED6'          # Accent Sky Blue
+dtu_navy = '#2F3EEA'         # Primary Electric Cobalt
+dtu_blue = '#1E24B5'         # Deep Cobalt (Darker contrast for buttons)
+dtu_energy_blue = '#0284C7'  # Vibrant Cyan/Sky (Clean contrast for subheaders & secondary accents)
+dtu_light_blue = '#EEF2FF'   # Soft Periwinkle Tint (High contrast for editable cells & banners)
+dtu_sky = '#C7D2FE'          # Crisp Light Lavender (High visibility on the #2F3EEA sidebar)
 
 bg_page = '#F8FAFC'          # Modern clean slate background
 bg_card = '#FFFFFF'          # Pure white card surface
@@ -531,16 +531,26 @@ app.layout = html.Div([
         ], style={'backgroundColor': 'rgba(0, 0, 0, 0.2)', 'borderRadius': '6px', 'padding': '12px', 'marginTop': 'auto','marginBottom': '24px'}),
         # Acknowledgment Footer
         html.Div([
-                    html.Div("Acknowledgment", style={'color': '#FFFFFF', 'fontWeight': '600', 'fontSize': '11px', 'textTransform': 'uppercase', 'letterSpacing': '0.05em', 'marginBottom': '10px'}),
-                    html.P([
-                        "pySTREAM developed by Ida Cecilie Hoielt ",
-                         html.A("github pySTREAM",href="https://github.com/idahoielt/pySTREAM", target="_blank"),
-                    ], style={'color': '#94A3B8', 'fontSize': '11px', 'marginBottom': '4px'}),
-                    html.P([
-                        "STREAM developed by DTU Management ",
-                        html.A("https://www.esymodels.man.dtu.dk/da/stream ", href="https://www.esymodels.man.dtu.dk/da/stream", target="_blank")
-                    ], style={'color': '#94A3B8', 'fontSize': '11px', 'marginBottom': '4px'}),
-                ], style={'backgroundColor': 'rgba(0, 0, 0, 0.2)', 'borderRadius': '6px', 'padding': '12px', 'marginTop': 'auto'}),
+            html.Div("Acknowledgment", style={'color': '#FFFFFF', 'fontWeight': '600', 'fontSize': '11px', 'textTransform': 'uppercase', 'letterSpacing': '0.05em', 'marginBottom': '10px'}),
+            html.P([
+                "pySTREAM developed by Ida Cecilie Hoielt: ",
+                html.A(
+                    "GitHub repository",
+                    href="https://github.com/idahoielt/pySTREAM",
+                    target="_blank",
+                    style={'color': dtu_sky, 'textDecoration': 'underline', 'fontWeight': '600'}
+                ),
+            ], style={'color': '#E2E8F0', 'fontSize': '11px', 'marginBottom': '8px'}),
+            html.P([
+                "STREAM developed by DTU Management: ",
+                html.A(
+                    "DTU STREAM website",
+                    href="https://www.esymodels.man.dtu.dk/da/stream",
+                    target="_blank",
+                    style={'color': dtu_sky, 'textDecoration': 'underline', 'fontWeight': '600'}
+                )
+            ], style={'color': '#E2E8F0', 'fontSize': '11px', 'marginBottom': '4px'}),
+        ], style={'backgroundColor': 'rgba(0, 0, 0, 0.25)', 'borderRadius': '6px', 'padding': '12px', 'marginTop': 'auto'}),
     ], style=SIDEBAR_STYLE),
 
     # Main content area
@@ -599,7 +609,7 @@ def build_graphs_page(active_tab="sankey"):
                 inputStyle={"marginRight": "5px", "marginLeft": "14px"},
                 style={'fontWeight': '600', 'color': dtu_navy, 'fontSize': '13px', 'display': 'flex', 'flexWrap': 'wrap', 'alignItems': 'center'}
             )
-        ], style={**CARD_STYLE, 'padding': '12px 16px', 'backgroundColor': dtu_light_blue, 'borderColor': '#C7DDEE'}),
+        ], style={**CARD_STYLE, 'padding': '12px 16px', 'backgroundColor': dtu_light_blue, 'borderColor': '#C7D2FE'}),
         
         # Two-Column Chart Layout
         html.Div([
