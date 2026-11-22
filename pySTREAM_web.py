@@ -115,6 +115,9 @@ class ScenarioState:
         self.last_accessed = time.time()
         Backend.SCData = self.sc_file
         Backend.engr = self.engr
+        Backend.df_beta_SC = self.df_beta_SC
+        Backend.df_EnergySavings_SC = self.df_EnergySavings_SC
+        Backend.df_TechEff_SC = self.df_TechEff_SC
         SC_FEC_ES, SC_FEC_tFE, SC_FEC_tES = SC_calculations(self.SC_NEC_tFE_el, self.SC_NEC_tFE_heat)
         self.df_FEC_SC, self.df_FEC_SC_total = FEC_dataframe(SC_FEC_ES, SC_FEC_tFE, SC_FEC_tES)
         
@@ -270,6 +273,12 @@ def get_state():
     Backend.SCData = curr.sc_file
     if hasattr(curr, 'engr'):
         Backend.engr = curr.engr
+    if hasattr(curr, 'df_beta_SC'):
+        Backend.df_beta_SC = curr.df_beta_SC
+    if hasattr(curr, 'df_EnergySavings_SC'):
+        Backend.df_EnergySavings_SC = curr.df_EnergySavings_SC
+    if hasattr(curr, 'df_TechEff_SC'):
+        Backend.df_TechEff_SC = curr.df_TechEff_SC
     return curr
 
 class StateProxy:
