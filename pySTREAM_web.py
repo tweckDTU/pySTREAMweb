@@ -11,11 +11,15 @@ import copy
 import shutil
 import base64
 import io
+import time
+import tempfile
+import uuid
 import pandas as pd
 import numpy as np
 import openpyxl
 import plotly.graph_objects as go
 from dash import Dash, html, dcc, dash_table, Input, Output, State, callback_context, no_update
+from flask import session, has_request_context
 
 # Import existing Backend and Time_Series logic directly
 import Backend
@@ -79,12 +83,22 @@ SCENARIO_DATA_NAMES = [
     'df_FuelRefineryCost_SC', 'df_SectorsDetails_SC', 'co2_price_SC', 'df_TransportCosts_SC'
 ]
 
-# --- Global State in Session or In-Memory ---
+# --- Session-Aware Scenario State ---
 class ScenarioState:
-    def __init__(self):
+    def __init__(self, session_id="default"):
+        self.session_id = session_id
+        self.last_accessed = time.time()
+        # Per-session working copy of Scenario Data
+        self.session_dir = os.path.join(tempfile.gettempdir(), f"pystream_{session_id}")
+        os.makedirs(self.session_dir, exist_ok=True)
+        self.sc_file = os.path.join(self.session_dir, "Scenario Data.xlsx")
+        if not os.path.exists(self.sc_file):
+            shutil.copyfile(DEFAULT_SCData, self.sc_file)
         self.reset_to_current()
 
     def reset_to_current(self):
+        self.last_accessed = time.time()
+        Backend.SCData = self.sc_file
         data = load_SCdata()
         for name, value in zip(SCENARIO_DATA_NAMES, data):
             setattr(self, name, copy.deepcopy(value))
@@ -98,6 +112,9 @@ class ScenarioState:
         self.recalculate()
 
     def recalculate(self):
+        self.last_accessed = time.time()
+        Backend.SCData = self.sc_file
+        Backend.engr = self.engr
         SC_FEC_ES, SC_FEC_tFE, SC_FEC_tES = SC_calculations(self.SC_NEC_tFE_el, self.SC_NEC_tFE_heat)
         self.df_FEC_SC, self.df_FEC_SC_total = FEC_dataframe(SC_FEC_ES, SC_FEC_tFE, SC_FEC_tES)
         
@@ -150,8 +167,10 @@ class ScenarioState:
         self.df_hour = None
         self.technologies_used = None
 
-    def save_scenario_file(self, file_path):
-        workbook = openpyxl.load_workbook(file_path)
+    def save_scenario_file(self, file_path=None):
+        self.last_accessed = time.time()
+        target = file_path if (file_path and file_path != SCData) else self.sc_file
+        workbook = openpyxl.load_workbook(target)
         # Year
         sheet_year = workbook['Scenario Year']
         sheet_year.cell(row=2, column=1, value=self.Scenario_Year)
@@ -217,9 +236,50 @@ class ScenarioState:
         sheet_co2Price = workbook['CO2 Price']
         sheet_co2Price.cell(row=2, column=1, value=self.co2_price_SC)
 
-        workbook.save(file_path)
+        workbook.save(target)
 
-state = ScenarioState()
+# --- Per-User Session Management ---
+user_sessions = {}
+
+def cleanup_old_sessions():
+    """Remove user sessions inactive for more than 4 hours to keep memory clean."""
+    now = time.time()
+    expired = [sid for sid, s in list(user_sessions.items()) if (now - getattr(s, 'last_accessed', now)) > 14400]
+    for sid in expired:
+        s = user_sessions.pop(sid, None)
+        if s and hasattr(s, 'session_dir') and os.path.exists(s.session_dir):
+            try:
+                shutil.rmtree(s.session_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+def get_state():
+    cleanup_old_sessions()
+    sid = "default_session"
+    if has_request_context():
+        if 'session_id' not in session:
+            session['session_id'] = str(uuid.uuid4())
+            session.permanent = True
+        sid = session['session_id']
+    
+    if sid not in user_sessions:
+        user_sessions[sid] = ScenarioState(sid)
+    
+    curr = user_sessions[sid]
+    curr.last_accessed = time.time()
+    Backend.SCData = curr.sc_file
+    if hasattr(curr, 'engr'):
+        Backend.engr = curr.engr
+    return curr
+
+class StateProxy:
+    def __getattr__(self, name):
+        return getattr(get_state(), name)
+
+    def __setattr__(self, name, value):
+        setattr(get_state(), name, value)
+
+state = StateProxy()
 
 # --- Plot Helpers (Modern DTU Wind Aesthetic) ---
 def create_sankey_figure(df_fuelType_consumption, df_Fc, title):
@@ -376,6 +436,14 @@ def plotly_pie(series_data, title, colors=None):
 # --- Dash App Setup ---
 app = Dash(__name__, suppress_callback_exceptions=True)
 app.title = "pySTREAM | DTU Wind & Energy Systems"
+server = app.server
+server.secret_key = os.environ.get('SECRET_KEY', 'pystream-dtu-wind-secret-key-2026')
+
+@server.before_request
+def ensure_session_cookie():
+    if 'session_id' not in session:
+        session['session_id'] = str(uuid.uuid4())
+        session.permanent = True
 
 # ==============================================================================
 # Modern CSS Styles & Design System
@@ -478,112 +546,115 @@ TABLE_STYLE_CELL = {
     'textAlign': 'left'
 }
 
-# --- Layout ---
-app.layout = html.Div([
-    dcc.Location(id="url", refresh=False),
-    
-    # Left Sidebar Menu (DTU Wind Identity)
-    html.Div([
-        # DTU Branding Header
+# --- Dynamic Session Layout ---
+def serve_layout():
+    return html.Div([
+        dcc.Location(id="url", refresh=False),
+        
+        # Left Sidebar Menu (DTU Wind Identity)
         html.Div([
+            # DTU Branding Header
             html.Div([
-                html.Span("DTU", style={
-                    'backgroundColor': dtu_red, 'color': '#FFFFFF', 'fontWeight': '800',
-                    'padding': '3px 8px', 'borderRadius': '4px', 'fontSize': '14px',
-                    'letterSpacing': '0.05em', 'marginRight': '8px'
-                }),
-                html.Span("Wind", style={'color': '#FFFFFF', 'fontSize': '18px', 'fontWeight': '700'}),
-            ], style={'display': 'flex', 'alignItems': 'center', 'marginBottom': '4px'}),
-            html.Div("pySTREAM 2.0 Web", style={'color': dtu_sky, 'fontSize': '13px', 'fontWeight': '600', 'letterSpacing': '0.02em'}),
-            html.Div("Energy System Simulation Tool", style={'color': '#94A3B8', 'fontSize': '10px', 'marginTop': '2px'})
-        ], style={'marginBottom': '24px', 'padding': '4px 6px 14px 6px', 'borderBottom': '1px solid rgba(255,255,255,0.1)'}),
-        
-        # Navigation Links
-        html.Div([
-            dcc.Link(html.Button("📊 Graphs & Energy Streams", style=NAV_BTN_STYLE), href="/graphs"),
-            dcc.Link(html.Button("⚡ Edit Consumption", style=NAV_BTN_STYLE), href="/consumption"),
-            dcc.Link(html.Button("🏭 Edit Production", style=NAV_BTN_STYLE), href="/production"),
-            dcc.Link(html.Button("📅 Base Year Data", style=NAV_BTN_STYLE), href="/by"),
-            dcc.Link(html.Button("🔮 Scenario Data", style=NAV_BTN_STYLE), href="/scenario"),
-            dcc.Link(html.Button("🚗 Transport Data", style=NAV_BTN_STYLE), href="/transport"),
-            dcc.Link(html.Button("🌱 CO2 Emissions", style=NAV_BTN_STYLE), href="/co2"),
-            dcc.Link(html.Button("💶 Economy & Costs", style=NAV_BTN_STYLE), href="/economy"),
-            dcc.Link(html.Button("📈 Time Series Simulation", style=NAV_BTN_STYLE), href="/timeseries"),
-        ], style={'marginBottom': '24px'}),
-        
-        # Scenario File Controls in Bottom Card
-        html.Div([
-            html.Div("Scenario Management", style={'color': '#FFFFFF', 'fontWeight': '600', 'fontSize': '11px', 'textTransform': 'uppercase', 'letterSpacing': '0.05em', 'marginBottom': '10px'}),
-            dcc.Upload(
-                id='upload-scenario',
-                children=html.Button("📂 Open scenario (.xlsx)", style={
+                html.Div([
+                    html.Span("DTU", style={
+                        'backgroundColor': dtu_red, 'color': '#FFFFFF', 'fontWeight': '800',
+                        'padding': '3px 8px', 'borderRadius': '4px', 'fontSize': '14px',
+                        'letterSpacing': '0.05em', 'marginRight': '8px'
+                    }),
+                    html.Span("Wind", style={'color': '#FFFFFF', 'fontSize': '18px', 'fontWeight': '700'}),
+                ], style={'display': 'flex', 'alignItems': 'center', 'marginBottom': '4px'}),
+                html.Div("pySTREAM 2.0 Web", style={'color': dtu_sky, 'fontSize': '13px', 'fontWeight': '600', 'letterSpacing': '0.02em'}),
+                html.Div("Energy System Simulation Tool", style={'color': '#94A3B8', 'fontSize': '10px', 'marginTop': '2px'})
+            ], style={'marginBottom': '24px', 'padding': '4px 6px 14px 6px', 'borderBottom': '1px solid rgba(255,255,255,0.1)'}),
+            
+            # Navigation Links
+            html.Div([
+                dcc.Link(html.Button("📊 Graphs & Energy Streams", style=NAV_BTN_STYLE), href="/graphs"),
+                dcc.Link(html.Button("⚡ Edit Consumption", style=NAV_BTN_STYLE), href="/consumption"),
+                dcc.Link(html.Button("🏭 Edit Production", style=NAV_BTN_STYLE), href="/production"),
+                dcc.Link(html.Button("📅 Base Year Data", style=NAV_BTN_STYLE), href="/by"),
+                dcc.Link(html.Button("🔮 Scenario Data", style=NAV_BTN_STYLE), href="/scenario"),
+                dcc.Link(html.Button("🚗 Transport Data", style=NAV_BTN_STYLE), href="/transport"),
+                dcc.Link(html.Button("🌱 CO2 Emissions", style=NAV_BTN_STYLE), href="/co2"),
+                dcc.Link(html.Button("💶 Economy & Costs", style=NAV_BTN_STYLE), href="/economy"),
+                dcc.Link(html.Button("📈 Time Series Simulation", style=NAV_BTN_STYLE), href="/timeseries"),
+            ], style={'marginBottom': '24px'}),
+            
+            # Scenario File Controls in Bottom Card
+            html.Div([
+                html.Div("Scenario Management", style={'color': '#FFFFFF', 'fontWeight': '600', 'fontSize': '11px', 'textTransform': 'uppercase', 'letterSpacing': '0.05em', 'marginBottom': '10px'}),
+                dcc.Upload(
+                    id='upload-scenario',
+                    children=html.Button("📂 Open scenario (.xlsx)", style={
+                        **NAV_BTN_STYLE, 'backgroundColor': 'rgba(255,255,255,0.08)', 'color': '#FFFFFF', 'fontSize': '11px', 'padding': '6px 10px', 'marginBottom': '6px'
+                    }),
+                    multiple=False
+                ),
+                html.Button("💾 Download scenario (.xlsx)", id="btn-download-sc", style={
                     **NAV_BTN_STYLE, 'backgroundColor': 'rgba(255,255,255,0.08)', 'color': '#FFFFFF', 'fontSize': '11px', 'padding': '6px 10px', 'marginBottom': '6px'
                 }),
-                multiple=False
-            ),
-            html.Button("💾 Download scenario (.xlsx)", id="btn-download-sc", style={
-                **NAV_BTN_STYLE, 'backgroundColor': 'rgba(255,255,255,0.08)', 'color': '#FFFFFF', 'fontSize': '11px', 'padding': '6px 10px', 'marginBottom': '6px'
-            }),
-            dcc.Download(id="download-scenario-xlsx"),
-            html.Button("🔄 Reset to default", id="btn-reset-sc", style={
-                **NAV_BTN_STYLE, 'backgroundColor': 'rgba(153, 0, 0, 0.4)', 'color': '#FFCCCC', 'fontSize': '11px', 'padding': '6px 10px', 'marginTop': '4px'
-            }),
-        ], style={'backgroundColor': 'rgba(0, 0, 0, 0.2)', 'borderRadius': '6px', 'padding': '12px', 'marginTop': 'auto','marginBottom': '24px'}),
-        # Acknowledgment Footer
-        html.Div([
-            html.Div("Acknowledgment", style={'color': '#FFFFFF', 'fontWeight': '600', 'fontSize': '11px', 'textTransform': 'uppercase', 'letterSpacing': '0.05em', 'marginBottom': '10px'}),
-            html.P([
-                "pySTREAM developed by Ida Cecilie Hoielt: ",
-                html.A(
-                    "GitHub repository",
-                    href="https://github.com/idahoielt/pySTREAM",
-                    target="_blank",
-                    style={'color': dtu_sky, 'textDecoration': 'underline', 'fontWeight': '600'}
-                ),
-            ], style={'color': '#E2E8F0', 'fontSize': '11px', 'marginBottom': '8px'}),
-            html.P([
-                "STREAM developed by DTU Management: ",
-                html.A(
-                    "DTU STREAM website",
-                    href="https://www.esymodels.man.dtu.dk/da/stream",
-                    target="_blank",
-                    style={'color': dtu_sky, 'textDecoration': 'underline', 'fontWeight': '600'}
-                )
-            ], style={'color': '#E2E8F0', 'fontSize': '11px', 'marginBottom': '4px'}),
-        ], style={'backgroundColor': 'rgba(0, 0, 0, 0.25)', 'borderRadius': '6px', 'padding': '12px', 'marginTop': 'auto'}),
-    ], style=SIDEBAR_STYLE),
-
-    # Main content area
-    html.Div([
-        # Top Header Bar with Scenario Year & Global Recalculate
-        html.Div([
+                dcc.Download(id="download-scenario-xlsx"),
+                html.Button("🔄 Reset to default", id="btn-reset-sc", style={
+                    **NAV_BTN_STYLE, 'backgroundColor': 'rgba(153, 0, 0, 0.4)', 'color': '#FFCCCC', 'fontSize': '11px', 'padding': '6px 10px', 'marginTop': '4px'
+                }),
+            ], style={'backgroundColor': 'rgba(0, 0, 0, 0.2)', 'borderRadius': '6px', 'padding': '12px', 'marginTop': 'auto','marginBottom': '24px'}),
+            # Acknowledgment Footer
             html.Div([
-                html.Span("Scenario Target Year: ", style={'fontWeight': '600', 'color': dtu_navy, 'fontSize': '14px', 'marginRight': '8px'}),
-                dcc.Input(
-                    id="input-scenario-year", type="number", value=state.Scenario_Year,
-                    style={'width': '85px', 'padding': '6px 8px', 'borderRadius': '4px', 'border': f'1px solid {border_subtle}', 'fontSize': '14px', 'fontWeight': '600', 'marginRight': '10px'}
-                ),
-                html.Button("Set Year", id="btn-update-year", style={**ACTION_BTN_STYLE, 'backgroundColor': dtu_energy_blue}),
-            ], style={'display': 'flex', 'alignItems': 'center'}),
+                html.Div("Acknowledgment", style={'color': '#FFFFFF', 'fontWeight': '600', 'fontSize': '11px', 'textTransform': 'uppercase', 'letterSpacing': '0.05em', 'marginBottom': '10px'}),
+                html.P([
+                    "pySTREAM developed by Ida Cecilie Hoielt: ",
+                    html.A(
+                        "GitHub repository",
+                        href="https://github.com/idahoielt/pySTREAM",
+                        target="_blank",
+                        style={'color': dtu_sky, 'textDecoration': 'underline', 'fontWeight': '600'}
+                    ),
+                ], style={'color': '#E2E8F0', 'fontSize': '11px', 'marginBottom': '8px'}),
+                html.P([
+                    "STREAM developed by DTU Management: ",
+                    html.A(
+                        "DTU STREAM website",
+                        href="https://www.esymodels.man.dtu.dk/da/stream",
+                        target="_blank",
+                        style={'color': dtu_sky, 'textDecoration': 'underline', 'fontWeight': '600'}
+                    )
+                ], style={'color': '#E2E8F0', 'fontSize': '11px', 'marginBottom': '4px'}),
+            ], style={'backgroundColor': 'rgba(0, 0, 0, 0.25)', 'borderRadius': '6px', 'padding': '12px', 'marginTop': 'auto'}),
+        ], style=SIDEBAR_STYLE),
+
+        # Main content area
+        html.Div([
+            # Top Header Bar with Scenario Year & Global Recalculate
             html.Div([
-                html.Button("⚡ Recalculate & Save Scenario", id="btn-global-update", style={
-                    **ACTION_BTN_STYLE, 'backgroundColor': dtu_navy, 'fontSize': '13px', 'padding': '8px 20px', 'border': f'1px solid {dtu_energy_blue}'
-                })
-            ])
-        ], style={
-            'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center',
-            'padding': '12px 20px', 'backgroundColor': bg_card, 'borderRadius': '8px',
-            'border': f'1px solid {border_subtle}', 'marginBottom': '18px',
-            'boxShadow': '0 1px 3px rgba(0,0,0,0.03)'
-        }),
+                html.Div([
+                    html.Span("Scenario Target Year: ", style={'fontWeight': '600', 'color': dtu_navy, 'fontSize': '14px', 'marginRight': '8px'}),
+                    dcc.Input(
+                        id="input-scenario-year", type="number", value=state.Scenario_Year,
+                        style={'width': '85px', 'padding': '6px 8px', 'borderRadius': '4px', 'border': f'1px solid {border_subtle}', 'fontSize': '14px', 'fontWeight': '600', 'marginRight': '10px'}
+                    ),
+                    html.Button("Set Year", id="btn-update-year", style={**ACTION_BTN_STYLE, 'backgroundColor': dtu_energy_blue}),
+                ], style={'display': 'flex', 'alignItems': 'center'}),
+                html.Div([
+                    html.Button("⚡ Recalculate & Save Scenario", id="btn-global-update", style={
+                        **ACTION_BTN_STYLE, 'backgroundColor': dtu_navy, 'fontSize': '13px', 'padding': '8px 20px', 'border': f'1px solid {dtu_energy_blue}'
+                    })
+                ])
+            ], style={
+                'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center',
+                'padding': '12px 20px', 'backgroundColor': bg_card, 'borderRadius': '8px',
+                'border': f'1px solid {border_subtle}', 'marginBottom': '18px',
+                'boxShadow': '0 1px 3px rgba(0,0,0,0.03)'
+            }),
 
-        # Alert banner for messages/errors
-        html.Div(id="alert-banner", style={'marginBottom': '14px'}),
+            # Alert banner for messages/errors
+            html.Div(id="alert-banner", style={'marginBottom': '14px'}),
 
-        # Dynamic Page Content
-        html.Div(id="page-content")
-    ], style=CONTENT_STYLE)
-])
+            # Dynamic Page Content
+            html.Div(id="page-content")
+        ], style=CONTENT_STYLE)
+    ])
+
+app.layout = serve_layout
 
 # --- Page Builders ---
 def build_graphs_page(active_tab="sankey"):
@@ -1313,10 +1384,16 @@ def update_year(n_clicks, new_year):
             style={'color': dtu_red, 'fontWeight': '600', 'padding': '10px 14px', 'backgroundColor': '#FEF2F2', 'borderRadius': '6px', 'border': '1px solid #FCA5A5'}
         )
     state.Scenario_Year = int(new_year)
+    workbook = openpyxl.load_workbook(state.sc_file)
+    workbook['Scenario Year'].cell(row=2, column=1, value=state.Scenario_Year)
+    workbook.save(state.sc_file)
+    
+    Backend.SCData = state.sc_file
     state.SC_NEC_tFE_el, state.SC_NEC_tFE_heat, state.df_beta_BY, state.engr = BY_calculations()
+    Backend.engr = state.engr
     set_SC_transport_demand(state.df_Transport_SC, state.engr)
     state.recalculate()
-    state.save_scenario_file(SCData)
+    state.save_scenario_file()
     return html.Div(
         f"✓ Scenario Target Year updated to {state.Scenario_Year} and calculations refreshed!",
         style={'color': '#065F46', 'fontWeight': '600', 'padding': '10px 14px', 'backgroundColor': '#D1FAE5', 'borderRadius': '6px', 'border': '1px solid #6EE7B7'}
@@ -1331,9 +1408,9 @@ def global_update(n_clicks):
     if not n_clicks:
         return no_update
     state.recalculate()
-    state.save_scenario_file(SCData)
+    state.save_scenario_file()
     return html.Div(
-        "✓ Scenario successfully recalculated and saved to Scenario Data.xlsx!",
+        "✓ Scenario successfully recalculated and saved!",
         style={'color': '#065F46', 'fontWeight': '600', 'padding': '10px 14px', 'backgroundColor': '#D1FAE5', 'borderRadius': '6px', 'border': '1px solid #6EE7B7'}
     )
 
@@ -1345,7 +1422,7 @@ def global_update(n_clicks):
 def reset_to_default(n_clicks):
     if not n_clicks:
         return no_update
-    shutil.copyfile(DEFAULT_SCData, SCData)
+    shutil.copyfile(DEFAULT_SCData, state.sc_file)
     state.reset_to_current()
     return html.Div(
         "✓ Scenario reset to DTU default benchmark!",
@@ -1437,8 +1514,8 @@ def compute_timeseries(n_clicks):
 def download_scenario_excel(n_clicks):
     if not n_clicks:
         return no_update
-    state.save_scenario_file(SCData)
-    return dcc.send_file(SCData, filename=f"pySTREAM_Scenario_{state.Scenario_Year}.xlsx")
+    state.save_scenario_file()
+    return dcc.send_file(state.sc_file, filename=f"pySTREAM_Scenario_{state.Scenario_Year}.xlsx")
 
 @app.callback(
     Output("url", "pathname"),
@@ -1452,7 +1529,7 @@ def upload_scenario_excel(contents, filename):
     content_type, content_string = contents.split(',')
     decoded = base64.b64decode(content_string)
     
-    with open(SCData, 'wb') as f:
+    with open(state.sc_file, 'wb') as f:
         f.write(decoded)
     
     state.reset_to_current()
